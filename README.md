@@ -135,6 +135,8 @@ Rules worth knowing:
 
 - A table needs at least one column and may declare at most one primary key. `PRIMARY KEY` implies `NOT NULL` and
   creates an index automatically.
+- Primary key values are unique. An `INSERT` or `UPDATE` that would give two live rows the same key is rejected before
+  anything is written. A key belonging to a deleted row is free to reuse.
 - Only one index may exist for a given column. Indexes are hash based and accelerate equality predicates.
 - The `INSERT` column list is required. Columns omitted from it receive `NULL`, subject to `NOT NULL` constraints.
 - String literals use single quotes. Escape an apostrophe by doubling it: `'O''Brien'`.
@@ -187,7 +189,6 @@ or distributed operation.
 
 Implemented, with sharp edges:
 
-- `PRIMARY KEY` creates a non-null indexed column, but duplicate key values are not currently rejected.
 - Only indexed equality predicates accelerate `SELECT`; every other predicate scans the heap.
 - `UPDATE` and `DELETE` collect their targets with a heap scan.
 - Sorting is performed in memory after matching rows are collected.

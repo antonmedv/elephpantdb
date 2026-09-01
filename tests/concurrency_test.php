@@ -171,6 +171,28 @@ return [
         }
     },
 
+    'lets exactly one of eight writers claim a primary key' => function () use ($requireFork, $fanOut): void {
+        $requireFork();
+
+        $directory = temporaryDirectory();
+        $db = new Database($directory);
+        $db->execute('CREATE TABLE t (id INT PRIMARY KEY, name TEXT)');
+
+        $fanOut(8, static function (int $writer) use ($directory): void {
+            $db = new Database($directory);
+
+            try {
+                $db->execute('INSERT INTO t (id, name) VALUES (?, ?)', [1, "w{$writer}"]);
+            } catch (SchemaException) {
+                // Seven of the eight writers must lose this race.
+            }
+        });
+
+        $rows = (new Database($directory))->execute('SELECT * FROM t')->rows;
+
+        assertSame(1, count($rows), 'the key may be claimed once');
+    },
+
     'waits for a rival lock probe instead of rejecting it' => function () use ($requireFork): void {
         $requireFork();
 

@@ -3262,7 +3262,10 @@ final class Executor
             }
         }
 
+        $binder->assertEveryParameterUsed();
+
         $table->lock->exclusive(function () use ($table, $schema, $values): void {
+            $this->assertPrimaryKeyFree($table, $values, null);
             $table->indexRow($table->heap->append(ValueCodec::encodeRow($schema->types(), $values)), $values);
         });
 
@@ -3345,30 +3348,47 @@ final class Executor
         }
 
         $predicate = $statement->where === null ? null : new Predicate($statement->where, $schema, $binder);
+        $primaryKey = $schema->primaryKeyOrdinal();
+        $reassignedKey = $primaryKey !== null && array_key_exists($primaryKey, $assignments) ? $primaryKey : null;
+
+        $binder->assertEveryParameterUsed();
 
         // The scan runs inside the exclusive lock so no other writer can retire a
         // row between it being matched and it being replaced.
-        return $table->lock->exclusive(function () use ($table, $types, $assignments, $predicate): QueryResult {
-            $targets = $this->collect($table, $types, $predicate);
+        return $table->lock->exclusive(
+            function () use ($table, $types, $assignments, $predicate, $reassignedKey): QueryResult {
+                $targets = $this->collect($table, $types, $predicate);
 
-            foreach ($targets as [$offset, $values]) {
-                $replacement = $values;
-
-                foreach ($assignments as $ordinal => $value) {
-                    $replacement[$ordinal] = $value;
+                if ($reassignedKey !== null && count($targets) > 1) {
+                    throw new SchemaException(
+                        "primary key '{$table->schema->column($reassignedKey)->name}' cannot be set on "
+                            . count($targets) . ' rows',
+                    );
                 }
 
-                $newOffset = $table->heap->append(ValueCodec::encodeRow($types, $replacement), $offset);
-                $table->heap->markDead($offset);
-                $table->reindexRow($offset, $values, $newOffset, $replacement);
-            }
+                foreach ($targets as [$offset, $values]) {
+                    $replacement = $values;
 
-            if ($targets !== []) {
-                $table->heap->finishSupersede();
-            }
+                    foreach ($assignments as $ordinal => $value) {
+                        $replacement[$ordinal] = $value;
+                    }
 
-            return QueryResult::affected(count($targets));
-        });
+                    if ($reassignedKey !== null) {
+                        $this->assertPrimaryKeyFree($table, $replacement, $offset);
+                    }
+
+                    $newOffset = $table->heap->append(ValueCodec::encodeRow($types, $replacement), $offset);
+                    $table->heap->markDead($offset);
+                    $table->reindexRow($offset, $values, $newOffset, $replacement);
+                }
+
+                if ($targets !== []) {
+                    $table->heap->finishSupersede();
+                }
+
+                return QueryResult::affected(count($targets));
+            },
+        );
     }
 
     private function delete(DeleteStatement $statement, Binder $binder): QueryResult
@@ -3379,6 +3399,8 @@ final class Executor
             ? null
             : new Predicate($statement->where, $table->schema, $binder);
 
+        $binder->assertEveryParameterUsed();
+
         return $table->lock->exclusive(function () use ($table, $types, $predicate): QueryResult {
             $targets = $this->collect($table, $types, $predicate);
 
@@ -3388,6 +3410,70 @@ final class Executor
 
             return QueryResult::affected(count($targets));
         });
+    }
+
+    /**
+     * @param list<mixed> $values
+     */
+    private function assertPrimaryKeyFree(Table $table, array $values, ?int $exempt): void
+    {
+        $ordinal = $table->schema->primaryKeyOrdinal();
+
+        if ($ordinal === null) {
+            return;
+        }
+
+        $value = $values[$ordinal];
+
+        foreach ($this->rowsWithValue($table, $table->schema->types(), $ordinal, $value) as $offset => $existing) {
+            if ($offset !== $exempt && $existing[$ordinal] === $value) {
+                throw new SchemaException(
+                    "duplicate value for primary key '{$table->schema->column($ordinal)->name}'",
+                );
+            }
+        }
+    }
+
+    /**
+     * @param list<ColumnType> $types
+     *
+     * @return Generator<int, list<mixed>>
+     */
+    private function rowsWithValue(Table $table, array $types, int $ordinal, mixed $value): Generator
+    {
+        $candidates = $table->candidatesFor($ordinal, $value);
+
+        if ($candidates === null) {
+            yield from $this->liveRows($table, $types);
+
+            return;
+        }
+
+        foreach ($candidates as $offset) {
+            try {
+                $record = $table->heap->read($offset);
+            } catch (StorageException) {
+                yield from $this->liveRows($table, $types);
+
+                return;
+            }
+
+            if ($record->live) {
+                yield $offset => ValueCodec::decodeRow($types, $record->payload);
+            }
+        }
+    }
+
+    /**
+     * @param list<ColumnType> $types
+     *
+     * @return Generator<int, list<mixed>>
+     */
+    private function liveRows(Table $table, array $types): Generator
+    {
+        foreach ($table->heap->scan() as $record) {
+            yield $record->offset => ValueCodec::decodeRow($types, $record->payload);
+        }
     }
 
     /**

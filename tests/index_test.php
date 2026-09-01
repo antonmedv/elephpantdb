@@ -8,8 +8,6 @@ $openIndex = static function (string $directory, string $column = 'id'): HashInd
     return new HashIndex($paths->index('t', $column), new Lock($paths->lock('t')));
 };
 
-// A single-row index puts the only entry at the head of the only occupied
-// bucket, so the lookup for that row is guaranteed to read it.
 $scribbleFirstEntry = static function (int $fieldOffset, string $bytes): string {
     $directory = temporaryDirectory();
     $db = new Database($directory);

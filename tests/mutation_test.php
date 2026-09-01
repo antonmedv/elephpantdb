@@ -206,4 +206,87 @@ return [
     'counts mutation parameters as used' => function () use ($stocked): void {
         assertThrows(SchemaException::class, fn () => $stocked()->execute('DELETE FROM t WHERE id = ?', [1, 2]));
     },
+
+    'writes nothing when an insert carries a surplus parameter' => function () use ($stocked, $rows): void {
+        $db = $stocked();
+
+        assertThrows(
+            SchemaException::class,
+            fn () => $db->execute('INSERT INTO t (id, name) VALUES (?, ?)', [4, 'dee', 'surplus']),
+        );
+
+        assertSame([1, 2, 3], array_column($rows($db), 'id'), 'a rejected insert must not commit');
+    },
+
+    'writes nothing when an update carries a surplus parameter' => function () use ($stocked, $rows): void {
+        $db = $stocked();
+
+        assertThrows(
+            SchemaException::class,
+            fn () => $db->execute('UPDATE t SET name = ? WHERE id = ?', ['ANA', 1, 'surplus']),
+        );
+
+        assertSame(['ana', 'bo', 'carol'], array_column($rows($db), 'name'), 'a rejected update must not commit');
+    },
+
+    'rejects an insert that repeats a primary key' => function () use ($stocked, $rows): void {
+        $db = $stocked();
+
+        assertThrows(
+            SchemaException::class,
+            fn () => $db->execute('INSERT INTO t (id, name) VALUES (?, ?)', [2, 'other']),
+        );
+
+        assertSame([1, 2, 3], array_column($rows($db), 'id'));
+        assertSame([['id' => 2, 'name' => 'bo']], $rows($db, 'SELECT id, name FROM t WHERE id = ?', [2]));
+    },
+
+    'accepts a primary key freed by a delete' => function () use ($stocked, $rows): void {
+        $db = $stocked();
+
+        $db->execute('DELETE FROM t WHERE id = ?', [2]);
+        $db->execute('INSERT INTO t (id, name) VALUES (?, ?)', [2, 'reused']);
+
+        assertSame([['id' => 2, 'name' => 'reused']], $rows($db, 'SELECT id, name FROM t WHERE id = ?', [2]));
+    },
+
+    'rejects an update onto an occupied primary key' => function () use ($stocked, $rows): void {
+        $db = $stocked();
+
+        assertThrows(SchemaException::class, fn () => $db->execute('UPDATE t SET id = ? WHERE id = ?', [3, 1]));
+        assertSame([1, 2, 3], array_column($rows($db), 'id'));
+        assertSame(['ana', 'bo', 'carol'], array_column($rows($db), 'name'));
+    },
+
+    'rejects one primary key assigned to several rows' => function () use ($stocked, $rows): void {
+        $db = $stocked();
+
+        assertThrows(SchemaException::class, fn () => $db->execute('UPDATE t SET id = ? WHERE id > ?', [9, 1]));
+        assertSame([1, 2, 3], array_column($rows($db), 'id'), 'nothing may be written before the rejection');
+    },
+
+    'moves a row onto a free primary key' => function () use ($stocked, $rows): void {
+        $db = $stocked();
+
+        assertSame(1, $db->execute('UPDATE t SET id = ? WHERE id = ?', [9, 1])->rowsAffected);
+        assertSame([2, 3, 9], array_column($rows($db), 'id'));
+        assertSame([['id' => 9, 'name' => 'ana']], $rows($db, 'SELECT id, name FROM t WHERE id = ?', [9]));
+        assertSame([], $rows($db, 'SELECT id FROM t WHERE id = ?', [1]));
+    },
+
+    'keeps a row on its own primary key when other columns change' => function () use ($stocked, $rows): void {
+        $db = $stocked();
+
+        assertSame(1, $db->execute('UPDATE t SET id = ?, name = ? WHERE id = ?', [1, 'ANA', 1])->rowsAffected);
+        assertSame([['id' => 1, 'name' => 'ANA']], $rows($db, 'SELECT id, name FROM t WHERE id = ?', [1]));
+    },
+
+    'allows duplicates in a table without a primary key' => function (): void {
+        $db = new Database(temporaryDirectory());
+        $db->execute('CREATE TABLE t (id INT, name TEXT)');
+        $db->execute('INSERT INTO t (id, name) VALUES (?, ?)', [1, 'ana']);
+        $db->execute('INSERT INTO t (id, name) VALUES (?, ?)', [1, 'bo']);
+
+        assertSame(['ana', 'bo'], array_column($db->execute('SELECT * FROM t')->rows, 'name'));
+    },
 ];
