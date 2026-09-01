@@ -356,4 +356,24 @@ return [
         assertThrows(ParseException::class, fn () => Parser::parse('CREATE INDEX idx users (name)'));
         assertThrows(ParseException::class, fn () => Parser::parse('CREATE INDEX idx ON users (a, b)'));
     },
+
+    'parses nesting that stays under the depth limit' => function (): void {
+        $nested = Parser::parse('SELECT * FROM t WHERE ' . str_repeat('NOT ', 90) . 'a = 1')->where;
+
+        assertTrue($nested instanceof NotExpression);
+    },
+
+    'rejects nesting deep enough to overflow the stack' => function (): void {
+        assertThrows(
+            ParseException::class,
+            fn () => Parser::parse('SELECT * FROM t WHERE ' . str_repeat('NOT ', 20000) . 'a = 1'),
+        );
+
+        assertThrows(
+            ParseException::class,
+            fn () => Parser::parse(
+                'SELECT * FROM t WHERE ' . str_repeat('(', 20000) . 'a = 1' . str_repeat(')', 20000),
+            ),
+        );
+    },
 ];

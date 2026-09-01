@@ -558,8 +558,8 @@ final class Lock
         }
 
         try {
-            if (!flock($held, LOCK_EX | LOCK_NB)) {
-                throw new StorageException("another process is probing locks in {$directory}");
+            if (!flock($held, LOCK_EX)) {
+                throw new StorageException("could not lock the probe in {$directory}");
             }
 
             if (flock($rival, LOCK_EX | LOCK_NB)) {
@@ -1719,9 +1719,26 @@ final class HashIndex
      */
     private function readEntry(int $offset): array
     {
+        $entriesStart = $this->entriesStart();
+        $size = $this->size();
+        $name = basename($this->path);
+
+        if ($offset < $entriesStart || $offset + self::ENTRY_FIXED_BYTES > $size) {
+            throw new StorageException("{$name} has an entry at {$offset} outside the file");
+        }
+
         $fixed = $this->readBytes($offset, 12);
-        $next = unpack('J', substr($fixed, 0, 8))[1];
-        $keyLength = unpack('N', substr($fixed, 8, 4))[1];
+        $next = (int) unpack('J', substr($fixed, 0, 8))[1];
+        $keyLength = (int) unpack('N', substr($fixed, 8, 4))[1];
+
+        if ($keyLength > $size - $offset - self::ENTRY_FIXED_BYTES) {
+            throw new StorageException("{$name} declares a key longer than the entry at {$offset}");
+        }
+
+        if ($next !== self::EMPTY_BUCKET && ($next < $entriesStart || $next >= $offset)) {
+            throw new StorageException("{$name} has an entry at {$offset} chained to {$next}");
+        }
+
         $key = $this->readBytes($offset + 12, $keyLength);
         $heapOffset = $this->readUint64($offset + 12 + $keyLength);
 
@@ -2141,9 +2158,12 @@ final class Parser
         'BOOL' => ColumnType::Boolean,
     ];
 
+    private const MAX_EXPRESSION_DEPTH = 100;
+
     private int $cursor = 0;
     private ?bool $positional = null;
     private int $placeholders = 0;
+    private int $depth = 0;
 
     /**
      * @param list<Token> $tokens
@@ -2419,18 +2439,26 @@ final class Parser
     // so no operand is ever parenthesised.
     private function negation(): Expression
     {
-        if ($this->consumeKeyword('NOT')) {
-            return new NotExpression($this->negation());
+        if (++$this->depth > self::MAX_EXPRESSION_DEPTH) {
+            throw new ParseException('expression nests deeper than ' . self::MAX_EXPRESSION_DEPTH . ' levels');
         }
 
-        if ($this->consumePunctuation('(')) {
-            $inner = $this->expression();
-            $this->expectPunctuation(')');
+        try {
+            if ($this->consumeKeyword('NOT')) {
+                return new NotExpression($this->negation());
+            }
 
-            return $inner;
+            if ($this->consumePunctuation('(')) {
+                $inner = $this->expression();
+                $this->expectPunctuation(')');
+
+                return $inner;
+            }
+
+            return $this->comparison();
+        } finally {
+            --$this->depth;
         }
-
-        return $this->comparison();
     }
 
     private function comparison(): Expression

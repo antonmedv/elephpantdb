@@ -8,6 +8,24 @@ $openIndex = static function (string $directory, string $column = 'id'): HashInd
     return new HashIndex($paths->index('t', $column), new Lock($paths->lock('t')));
 };
 
+// A single-row index puts the only entry at the head of the only occupied
+// bucket, so the lookup for that row is guaranteed to read it.
+$scribbleFirstEntry = static function (int $fieldOffset, string $bytes): string {
+    $directory = temporaryDirectory();
+    $db = new Database($directory);
+    $db->execute('CREATE TABLE t (id INT PRIMARY KEY, name TEXT)');
+    $db->execute('INSERT INTO t (id, name) VALUES (?, ?)', [1, 'ana']);
+
+    $path = $directory . '/t.idx.id';
+    $raw = (string) file_get_contents($path);
+    $entry = HashIndex::HEADER_BYTES + HashIndex::INITIAL_BUCKETS * 8;
+    $at = $entry + $fieldOffset;
+
+    file_put_contents($path, substr($raw, 0, $at) . $bytes . substr($raw, $at + strlen($bytes)));
+
+    return $directory;
+};
+
 return [
     'writes a header on first open' => function () use ($openIndex): void {
         $directory = temporaryDirectory();
@@ -462,5 +480,23 @@ return [
 
         assertSame([], $db->execute('SELECT * FROM t WHERE id = ?', [1])->rows);
         assertSame([], (new Database($directory))->execute('SELECT * FROM t WHERE id = ?', [1])->rows);
+    },
+
+    'refuses a chain that does not walk backwards' => function () use ($scribbleFirstEntry): void {
+        $directory = $scribbleFirstEntry(0, pack('J', HashIndex::HEADER_BYTES + HashIndex::INITIAL_BUCKETS * 8));
+
+        assertThrows(
+            StorageException::class,
+            fn () => (new Database($directory))->execute('SELECT * FROM t WHERE id = ?', [1]),
+        );
+    },
+
+    'refuses a key longer than the file' => function () use ($scribbleFirstEntry): void {
+        $directory = $scribbleFirstEntry(8, pack('N', 0xFFFFFFFF));
+
+        assertThrows(
+            StorageException::class,
+            fn () => (new Database($directory))->execute('SELECT * FROM t WHERE id = ?', [1]),
+        );
     },
 ];

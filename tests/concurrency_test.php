@@ -170,4 +170,41 @@ return [
             assertSame(0, $row['sequence'] % 2, 'an odd row survived its own delete');
         }
     },
+
+    'waits for a rival lock probe instead of rejecting it' => function () use ($requireFork): void {
+        $requireFork();
+
+        $directory = temporaryDirectory();
+        $probe = fopen($directory . '/.elephpantdb-lock-probe', 'c');
+
+        assertTrue($probe !== false && flock($probe, LOCK_EX), 'the parent must hold the probe first');
+
+        $child = pcntl_fork();
+
+        if ($child === -1) {
+            skip('could not fork');
+        }
+
+        if ($child === 0) {
+            $GLOBALS['temporaryDirectories'] = [];
+
+            try {
+                Lock::verifyExclusion($directory);
+                exit(0);
+            } catch (Throwable $failure) {
+                fwrite(STDERR, 'probe: ' . $failure->getMessage() . "\n");
+                exit(1);
+            }
+        }
+
+        usleep(200000);
+        flock($probe, LOCK_UN);
+        fclose($probe);
+        pcntl_waitpid($child, $status);
+
+        assertTrue(
+            pcntl_wifexited($status) && pcntl_wexitstatus($status) === 0,
+            'a cold start must block on a rival probe, not fail',
+        );
+    },
 ];
