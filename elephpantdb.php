@@ -1044,8 +1044,14 @@ final class Heap
         $this->lock->exclusive(function () use ($offset): void {
             $this->ensureCurrent();
 
-            if ($offset < self::HEADER_BYTES || $offset + self::RECORD_HEADER_BYTES > $this->size()) {
+            $size = $this->size();
+
+            if ($offset < self::HEADER_BYTES || $offset + self::RECORD_HEADER_BYTES > $size) {
                 throw new StorageException("offset {$offset} is outside the heap");
+            }
+
+            if ($this->readAt($offset, $size) instanceof HeapDamage) {
+                throw new StorageException("offset {$offset} does not start a heap record");
             }
 
             $this->writeAt($offset + self::FLAGS_OFFSET_IN_RECORD, pack('C', self::FLAG_DEAD));
@@ -1201,6 +1207,7 @@ final class Heap
 
         $size = $this->size();
         $offset = self::HEADER_BYTES;
+        $starts = [];
         $superseded = [];
 
         while ($offset < $size) {
@@ -1211,9 +1218,16 @@ final class Heap
             }
 
             if ($outcome->live && $outcome->supersedes !== 0) {
+                if (!isset($starts[$outcome->supersedes])) {
+                    throw new StorageException(
+                        "record at {$offset} supersedes {$outcome->supersedes}, which is not an earlier record",
+                    );
+                }
+
                 $superseded[$outcome->supersedes] = true;
             }
 
+            $starts[$offset] = true;
             $offset = $outcome->end;
         }
 
@@ -3053,7 +3067,15 @@ final class Table
             return null;
         }
 
-        return $index->offsetsFor($this->key($ordinal, $value));
+        $key = $this->key($ordinal, $value);
+
+        try {
+            return $index->offsetsFor($key);
+        } catch (StorageException) {
+            $this->rebuildIndex($ordinal);
+
+            return $index->offsetsFor($key);
+        }
     }
 
     public function compact(): int

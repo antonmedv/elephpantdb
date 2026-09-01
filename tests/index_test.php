@@ -480,21 +480,36 @@ return [
         assertSame([], (new Database($directory))->execute('SELECT * FROM t WHERE id = ?', [1])->rows);
     },
 
-    'refuses a chain that does not walk backwards' => function () use ($scribbleFirstEntry): void {
+    'refuses a chain that does not walk backwards' => function () use ($openIndex, $scribbleFirstEntry): void {
         $directory = $scribbleFirstEntry(0, pack('J', HashIndex::HEADER_BYTES + HashIndex::INITIAL_BUCKETS * 8));
+        $index = $openIndex($directory);
 
         assertThrows(
             StorageException::class,
-            fn () => (new Database($directory))->execute('SELECT * FROM t WHERE id = ?', [1]),
+            fn () => $index->offsetsFor(ValueCodec::encodeValue(ColumnType::Integer, 1)),
         );
     },
 
-    'refuses a key longer than the file' => function () use ($scribbleFirstEntry): void {
+    'refuses a key longer than the file' => function () use ($openIndex, $scribbleFirstEntry): void {
         $directory = $scribbleFirstEntry(8, pack('N', 0xFFFFFFFF));
+        $index = $openIndex($directory);
 
         assertThrows(
             StorageException::class,
-            fn () => (new Database($directory))->execute('SELECT * FROM t WHERE id = ?', [1]),
+            fn () => $index->offsetsFor(ValueCodec::encodeValue(ColumnType::Integer, 1)),
         );
+    },
+
+    'rebuilds an index whose damage only surfaces at query time' => function () use ($scribbleFirstEntry): void {
+        $directory = $scribbleFirstEntry(0, pack('J', HashIndex::HEADER_BYTES + HashIndex::INITIAL_BUCKETS * 8));
+        $db = new Database($directory);
+
+        assertSame([['id' => 1, 'name' => 'ana']], $db->execute('SELECT * FROM t WHERE id = ?', [1])->rows);
+        assertSame([['id' => 1, 'name' => 'ana']], $db->execute('SELECT * FROM t WHERE id = ?', [1])->rows);
+
+        Heap::resetRecordReads();
+        (new Database($directory))->execute('SELECT * FROM t WHERE id = ?', [1]);
+
+        assertTrue(Heap::recordReads() < 4, 'the repaired index must still answer without a scan');
     },
 ];

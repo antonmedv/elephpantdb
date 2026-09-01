@@ -51,6 +51,18 @@ $setHeader = static function (string $raw, ?int $mark, ?int $flags): string {
     return $raw;
 };
 
+$pointLastSupersedesAt = static function (string $directory, callable $target) use ($recordFlagOffsets, $setHeader): void {
+    $path = $directory . '/t.heap';
+    $raw = (string) file_get_contents($path);
+    $starts = $recordFlagOffsets($raw);
+    $last = $starts[count($starts) - 1];
+    $at = $last + 8;
+
+    $raw = substr($raw, 0, $at) . pack('J', $target($starts, strlen($raw))) . substr($raw, $at + 8);
+
+    file_put_contents($path, $setHeader($raw, null, Heap::SUPERSEDE_PENDING));
+};
+
 return [
     'a completed update leaves one live record for the row' => function () use ($seed, $liveRecords): void {
         $directory = temporaryDirectory();
@@ -303,5 +315,54 @@ return [
 
         (new Database($directory))->execute('SELECT * FROM t');
         assertSame($first, (string) file_get_contents($path));
+    },
+
+    'refuses a supersedes pointer past the end of the heap' => function () use ($seed, $pointLastSupersedesAt): void {
+        $directory = temporaryDirectory();
+        $seed($directory);
+        (new Database($directory))->execute('UPDATE t SET name = ? WHERE id = ?', ['ONE', 1]);
+
+        $path = $directory . '/t.heap';
+        $pointLastSupersedesAt($directory, static fn (array $starts, int $size): int => $size + 4_000_000);
+        $before = filesize($path);
+
+        assertThrows(StorageException::class, fn () => (new Database($directory))->execute('SELECT * FROM t'));
+
+        clearstatcache();
+        assertSame($before, filesize($path), 'a rejected pointer must not extend the heap');
+    },
+
+    'refuses a supersedes pointer inside another record' => function () use ($seed, $pointLastSupersedesAt): void {
+        $directory = temporaryDirectory();
+        $seed($directory);
+        (new Database($directory))->execute('UPDATE t SET name = ? WHERE id = ?', ['ONE', 1]);
+
+        $pointLastSupersedesAt($directory, static fn (array $starts): int => $starts[1] + 4);
+
+        assertThrows(StorageException::class, fn () => (new Database($directory))->execute('SELECT * FROM t'));
+    },
+
+    'refuses a supersedes pointer at a later record' => function () use ($seed, $pointLastSupersedesAt): void {
+        $directory = temporaryDirectory();
+        $seed($directory);
+        (new Database($directory))->execute('UPDATE t SET name = ? WHERE id = ?', ['ONE', 1]);
+
+        $pointLastSupersedesAt($directory, static fn (array $starts): int => $starts[count($starts) - 1]);
+
+        assertThrows(StorageException::class, fn () => (new Database($directory))->execute('SELECT * FROM t'));
+    },
+
+    'refuses to tombstone an offset that does not start a record' => function () use ($seed, $openHeap, $recordFlagOffsets): void {
+        $directory = temporaryDirectory();
+        $seed($directory);
+
+        $starts = $recordFlagOffsets((string) file_get_contents($directory . '/t.heap'));
+        $heap = $openHeap($directory);
+
+        try {
+            assertThrows(StorageException::class, fn () => $heap->markDead($starts[1] + 4));
+        } finally {
+            $heap->close();
+        }
     },
 ];
